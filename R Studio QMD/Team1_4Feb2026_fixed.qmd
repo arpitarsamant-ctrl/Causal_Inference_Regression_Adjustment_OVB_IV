@@ -1,0 +1,1182 @@
+---
+title: "Project 2: Team 1"
+subtitle: ""
+author: "Team 1: Empirical Healthcare Analytics - Muhammad Sawaiz Fatar, Victor Ostolaza, Vedaant Rath, Arpita Ram Samant, Sam Sheng"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+execute:
+  warning: false
+editor: visual
+---
+
+## 1. Introduction
+
+### 1.1 Who We Are
+
+**Firm: Empirical Healthcare Analytics**\
+We specialize in medical technology assessment. Our goal is to help decision makers determine whether “cost-saving” medical devices are actually costing more in the long run due to hidden downstream complications. We differentiate between **bad luck** (random clinical variance) and **bad policy** (avoidable system-level incentives and bottlenecks).
+
+### 1.2 The Client
+
+**Client:** National Academies of Sciences, Engineering, and Medicine
+
+**The Landscape:** The National Academies convene independent experts and academics to produce evidence based guidance that informs government action and hospital standards. They are concerned with long-run public impact: not just what happens in the operating room, but what happens years later across the healthcare system.
+
+Their priority is avoiding the left pocket vs. right pocket problem: saving money in one domain (Cardiac) shouldn’t quietly trigger higher costs and worse outcomes in another (Neurology).
+
+### 1.3 The Story
+
+A pacemaker is a small implanted battery and computer that helps maintain a safe heartbeat. While modern pacemakers are effective at treating rhythm problems, they can create **very different diagnostic realities** for the patient:
+
+-   **Legacy (non MRI-conditional) pacemaker systems:** Often older systems that can be harder to scan in MRI. In many settings, these scans require extra coordination, monitoring, and specialized workflows, so access can be uneven across hospitals.
+
+-   **MRI-conditional pacemaker systems:** Designed and labeled for MRI under specific conditions. These systems make it easier for patients with pacemakers to get MRI scans, and there is less friction. ([FDA Access Data](https://www.accessdata.fda.gov/cdrh_docs/pdf9/p090013b.pdf "SUMMARY OF SAFETY AND EFFECTIVENESS DATA (SSED)"))
+
+MRI is often critical for evaluating early neurological changes (e.g., cognitive decline, small strokes). When access is delayed or inconsistent, clinicians may have less information at the exact moment early intervention is most valuable. ([American College of Cardiology](https://www.acc.org/Latest-in-Cardiology/Articles/2024/05/21/10/30/Current-State-of-MRI-With-Cardiac-Devices "Current State of MRI With Cardiac Devices - American College of Cardiology"))
+
+### 1.4 The Consequence
+
+When a patient with a legacy system shows early signs of cognitive decline or stroke risk, they may face a **Diagnostic Penalty**: not because care is impossible in theory, but because it is harder to deliver in practice.
+
+That penalty can **snowball:**
+
+-   delayed imaging = delayed diagnosis
+
+-   delayed/missed diagnosis = delayed management
+
+-   delayed management = higher long-run care needs
+
+This is devastating for families and expensive for the healthcare system.
+
+### 1.5 The Question
+
+The National Academies have asked us to evaluate whether device choice is creating preventable downstream harm. They have posed this question to us:
+
+> “Among patients who need a pacemaker, does choosing a Legacy System cause worse cognitive outcomes over time compared to choosing an MRI-Conditional System?”
+
+**How the result will be used:**
+
+-   If **yes**, the National Academies can recommend changes to device standards, hospital protocols, and government guidance to reduce avoidable diagnostic delays.
+
+-   If **no**, and differences are explained by other patient risk factors, then the priority should shift toward targeting those risks rather than focusing on device type.
+
+### 1.6 Defining Variables
+
+**Treatment (D):**
+
+-   **D = 1:** Legacy pacemaker system implanted
+
+-   **D = 0:** MRI-conditional pacemaker system implanted
+
+**Outcome (Y):**
+
+-   **Montreal Cognitive Assessment (MoCA)** score (0–30; higher is better; \<26 suggests impairment) ([PubMed](https://pubmed.ncbi.nlm.nih.gov/15817019/?utm_source=chatgpt.com "a brief screening tool for mild cognitive impairment - PubMed"))
+
+**Treatment Effect (what we’re estimating):** The causal change in MoCA attributable to pacemaker type.
+
+**Expected direction:** We expect MRI-conditional pacemakers to be associated with better cognitive outcomes, so we expect **legacy systems to reduce MoCA** on average (a negative effect of D=1).
+
+**Confounders (X):**\
+These affect both device type and cognitive outcomes. If not controlled for, they can bias the results.
+
+-   **Wealth:** Wealthier patients generally have better health insurance and access to top tier hospitals, making them more likely to receive the **Conditional** pacemaker Simultaneously, wealth correlates with better access to nutrition, lower life stress, and higher education, all of which help maintain higher MoCA scores.
+
+> ### What we tell the client
+>
+> *Our hypothesis is not that pacemakers directly “cause dementia.” The question is whether **device choice creates a predictable diagnostic bottleneck** that leads to later detection and worse downstream problems. Our analysis will separate **bad luck** (patients who were already higher-risk) from **bad policy**. If a legacy system penalty exists, we will quantify it in patient terms (MoCA impact) and translate it into actionable recommendations for hospitals and government guidance.*
+
+### 1.7 The DAG
+
+```{r}
+#| label: fig-dag1
+#| fig-cap: "DAG 1: Causal relationships between pacemaker type, wealth, and cognitive outcomes"
+
+library(ggdag)
+library(dagitty)
+library(ggplot2)
+library(dplyr)
+
+# Define DAG 1 with coordinates
+dag1 <- dagify(
+  Y ~ D + X,
+  D ~ X,
+  coords = list(
+    x = c(D = 0, Y = 2, X = 1),
+    y = c(D = 0, Y = 0, X = 1)
+  ),
+  labels = c(
+    Y = "MoCA Score (Y)",
+    D = "Legacy Pacemaker (D=1)",
+    X = "Household Income"
+  ),
+  exposure = "D",
+  outcome = "Y"
+)
+
+ggdag(dag1, text = FALSE, use_labels = "label") +
+  theme_dag() +
+  labs(title = "DAG 1: Observed Confounder (Wealth)")
+```
+
+### 1.8 Methods Being Used to Answer the Clients Question:
+
+We first try out regression adjustment to get the treatment effect, and then try out a combination of regression adjustment and matching, to produce results with less bias. After that, we do further causal analysis based on any additional client inputs. If the clients happen to inform us about a new confounder, possibly one that cannot be measured, we would have to take into account the fact that our previous analysis contained omitted variable bias. Based on discussions with the client, we would determine whether the bias is positive or negative, and then we would proceed to tackle it by introducing an instrument variable, and performing regression with it.
+
+## 2. Building the Dataset
+
+### 2.1 How will we model selection bias?
+
+To realistically model **selection bias**, we do **NOT** treat pacemaker type as randomly assigned. Instead, we model a reality where **household income** shapes both (1) access to modern device technology and (2) baseline long-run health.
+
+-   **MRI-Conditional Group (D = 0):** Higher-income patients are more likely to receive **MRI-conditional pacemakers**, because they are treated in better settings with newer device inventories.
+
+-   **Legacy Group (D = 1):** Lower-income patients are more likely to receive **legacy systems**.
+
+**Note:** If we don’t build this structure into the simulated data, we risk falsely crediting the device for advantages that actually come from income-linked access and health protection.
+
+### 2.2 Creating a realistic income distribution (mean + SD)
+
+For U.S. household income in 2024:
+
+-   **Mean household income:** **\$121,000**
+
+-   **Median household income:** **\$83,730** ([Census Bureau](https://www2.census.gov/library/publications/2025/demo/p60-286.pdf "Income in the United States: 2024"))
+
+The Census report also provides **income percentiles** (e.g., 10th, 50th, 90th, 95th) and the **mean income of the top 5%** (**\$560,000**) ([Census Bureau](https://www2.census.gov/library/publications/2025/demo/p60-286.pdf "Income in the United States: 2024")).
+
+**Income distribution (2024 dollars):**
+
+-   10th percentile ≈ **\$19,900**
+
+-   50th percentile (median) = **\$83,730**
+
+-   90th percentile ≈ **\$251,000**
+
+-   95th percentile ≈ **\$335,700**
+
+-   Mean of top 5% ≈ **\$560,000** ([Census Bureau](https://www2.census.gov/library/publications/2025/demo/p60-286.pdf "Income in the United States: 2024"))
+
+> Income is spread out in real life which is exactly why it’s such a powerful confounder.
+
+### 2.3 Treatment (D): Pacemaker Type
+
+#### Studies relevant to pacemaker types:
+
+-   In one study of MRI scans in patients with cardiac devices, among 74 pacemaker patients, 60 (81%) had conventional/legacy pacemakers and 14 (19%) had MRI-conditional pacemakers. ([American Journal of Roentgenology](https://ajronline.org/doi/10.2214/AJR.16.16033?utm_source=chatgpt.com "Safety and Quality of 1.5-T MRI in Patients With Conventional ..."))
+
+-   Another clinical study reported **60% conventional** vs **40% MR-conditional** devices among patients undergoing MRI. ([kjim.org](https://www.kjim.org/m/journal/view.php?number=170054&utm_source=chatgpt.com "Experiences of magnetic resonance imaging scanning in ..."))
+
+**How we use this in the simulation:**
+
+-   Pick a baseline legacy share (e.g., **30–60%**) and
+
+-   Let **income drive the probability** of legacy vs MRI-conditional using a logistic selection rule
+
+### 2.4 Simulating treatment assignment
+
+We simulate treatment assignment so that the probability of receiving a legacy pacemaker is **inversely related** to income:
+
+-   **Lower income = higher probability (D=1 legacy)**
+
+-   **Higher income = higher probability (D=0 MRI-conditional)**
+
+### 2.5 Outcome Variable (Y): MoCA Score (Cognitive Outcome)
+
+We use **Montreal Cognitive Assessment (MoCA)** as the outcome:
+
+-   Range: **0–30**, higher is better
+
+-   Common clinical threshold: **26** as a screening cutoff for impairment risk ([PubMed](https://pubmed.ncbi.nlm.nih.gov/15817019/?utm_source=chatgpt.com "a brief screening tool for mild cognitive impairment - PubMed"))
+
+**Data Generating Logic:**
+
+-   Start with a baseline MoCA level
+
+-   Add an income-linked component (higher income = slightly higher expected MoCA)
+
+-   Apply a **penalty** for legacy devices (true treatment effect) ([American College of Cardiology](https://www.acc.org/Latest-in-Cardiology/Articles/2024/05/21/10/30/Current-State-of-MRI-With-Cardiac-Devices "Current State of MRI With Cardiac Devices - American College of Cardiology"))
+
+> ### How we might explain selection bias to the client in our words:
+>
+> *We’ve got John and Mary. John gets the newer MRI-conditional pacemaker, and Mary has a legacy one. If we just compare them, we might think any difference in their cognitive scores is because of the device. But what if John was already on track for better outcomes because of something else, like his background, hospital, or resources? What we really need is to imagine two Johns: same life, same situation but different pacemakers. That comparison would show us the real effect. Right now, the tricky part is that John and Mary’s device might be reflecting more than just the pacemaker, it might reflect **who gets access to what. In this context, selection bias means that the type of pacemaker someone gets isn’t random, it’s tied to their circumstances.***
+
+### 2.6 Dataset Simulation Code
+
+```{r}
+
+### This code adapts your previous framework to the new "Legacy vs. MRI-Conditional" premise. It utilizes a Log-Normal distribution to match the 2024 U.S. Census income data (skewed right) and models the selection bias where wealth drives access to modern technology.
+
+
+library(tidyverse)
+library(knitr)
+
+# @team please do not change the seed to ensure reproducibility!
+set.seed(2026)
+
+# --- PART 1: Generate Covariates (N=5000) ---
+n <- 5000
+
+# Household income calibration targets (2024 US Census):
+# - Median: ~$83,730  -> meanlog ≈ log(83730) ≈ 11.33
+# - Right-skewed distribution -> sdlog ~ 0.85 to create a long right tail
+meanlog_income <- 11.33
+sdlog_income   <- 0.85
+
+data <- tibble(
+  id = 1:n,
+  household_income_raw = rlnorm(n, meanlog = meanlog_income, sdlog = sdlog_income)
+) %>%
+  mutate(
+    household_income = round(household_income_raw, -2),  # round to nearest $100
+    log_income = log(household_income)
+  ) %>%
+  select(-household_income_raw)
+
+# --- PART 2: Assign Treatment (Selection Bias) ---
+# Treatment: D = 1 (Legacy / non–MRI-conditional) vs D = 0 (MRI-conditional)
+# Mechanism: Lower household income -> higher probability of legacy, with overlap.
+
+# Generate treatment probabilities
+data <- data %>%
+  mutate(
+    z_income = (log_income - meanlog_income),
+    logit_prob = 0 + (-1.6) * z_income,
+    prob_legacy = plogis(logit_prob)
+  )
+
+# Assign treatment using runif comparison (equivalent to rbinom but more reliable in dplyr)
+data <- data %>%
+  mutate(
+    legacy_device = as.integer(runif(n()) < prob_legacy)
+  ) %>%
+  select(-z_income, -logit_prob, -prob_legacy)
+
+# --- PART 3: Generate Outcome (MoCA Score) ---
+# Outcome: MoCA (0-30)
+# Baseline around 26, increases with income (proxy for reserve/access), plus noise.
+# TRUE TREATMENT EFFECT: legacy devices impose a constant diagnostic penalty.
+
+true_treatment_effect <- -2.5
+
+data <- data %>%
+  mutate(
+    # Income effect modeled as +1.5 points per 1 SD increase in log-income
+    cog_baseline = 26.0 + 1.5 * ((log_income - meanlog_income) / sdlog_income),
+
+    # Measurement noise
+    noise = rnorm(n, mean = 0, sd = 2.0),
+
+    # Potential outcomes (simulation truth labels)
+    y_0 = cog_baseline + noise,                          # if MRI-conditional (D=0)
+    y_1 = cog_baseline + noise + true_treatment_effect,  # if legacy (D=1)
+
+    # Observed outcome
+    moca_score = ifelse(legacy_device == 1, y_1, y_0),
+
+    # Bounds: MoCA is 0-30
+    moca_score = pmin(pmax(moca_score, 0), 30)
+  )
+
+# --- PART 4: Verification Table ---
+# Purpose: sanity-check that your "Two Worlds" structure exists:
+# - Legacy group has lower household income (selection bias exists)
+# - Legacy group has lower unadjusted MoCA (mix of selection + treatment effect)
+
+verification_table <- data %>%
+  group_by(legacy_device) %>%
+  summarise(
+    Count = n(),
+    Share = paste0(round(n() / nrow(data) * 100, 1), "%"),
+    Median_Household_Income = paste0("$", format(median(household_income), big.mark = ",")),
+    Mean_Household_Income   = paste0("$", format(mean(household_income), big.mark = ",")),
+    Avg_MoCA = round(mean(moca_score), 1)
+  ) %>%
+  mutate(Group = ifelse(legacy_device == 1, "Legacy (Treatment)", "MRI-Conditional (Control)")) %>%
+  select(Group, Count, Share, Median_Household_Income, Mean_Household_Income, Avg_MoCA)
+
+kable(verification_table, caption = "Table 1: Baseline Characteristics by Device Type (Selection Bias Check)")
+
+# --- PART 5 (Optional but recommended): Create an "analysis-only" dataset ---
+# In real-world data you NEVER observe y_0 and y_1.
+analysis_data <- data %>%
+  select(id, household_income, legacy_device, moca_score)
+
+
+```
+
+```{r}
+# --- PART 6: Save Data to CSV ---
+# This saves the file to your current working directory
+write_csv(analysis_data, "Empirical_Healthcare_Project1_Data.csv")
+
+# Optional: Print where it was saved so you can find it
+cat("Data saved to:", getwd(), "/Empirical_Healthcare_Project1_Data.csv")
+```
+
+```{r}
+head(analysis_data)
+```
+
+### 2.7 EDA
+
+#### A) How cognition varies by pacemaker type
+
+```{r}
+
+analysis_data %>%
+  mutate(device_type = factor(legacy_device, levels=c(0,1),
+                              labels=c("Modern (0)", "Legacy (1)"))) %>%
+  ggplot(aes(x = device_type, y = moca_score)) +
+  geom_boxplot() +
+  labs(title = "Cognition differs by device type",
+       x = "Device type", y = "MoCA score")
+```
+
+We can see here that there is clearly a difference between the treated and control groups. There is something driving this gap. We can also see outliers, specifically in the legcy group. Probably this is due to rich people opting for legacy devices due to short life expectancy, or other factors?
+
+#### B) Distribution of income
+
+```{r}
+analysis_data <- analysis_data %>%
+  mutate(log_income = log(household_income))
+
+# Check skew 
+ggplot(analysis_data, aes(x = household_income)) +
+  geom_histogram(bins = 50) +
+  labs(title = "Household income is skewed",
+       x = "Household income", y = "Count")
+
+```
+
+Our patients don’t come from a typical income distribution. Most are clustered at lower–middle incomes, with a long tail of very high earners. Why we did this EDA: To see if income has extreme values that could distort comparisons and regressions.
+
+-   Using raw income in regression can let a few ultra high incomes overly influence results.
+
+-   Better to use log(income) or robust methods so the model captures relative differences in wealth better
+
+-   It also hints that treatment assignment (legacy vs modern) might be driven by income, which is where confounding starts.
+
+```{r}
+# log(income) pot
+ggplot(analysis_data, aes(x = log_income)) +
+  geom_histogram(bins = 50) +
+  labs(title = "Log income is closer to symmetric",
+       x = "log(Household income)", y = "Count")
+```
+
+Once we log-transform income, the distribution looks much more normal, wealth differences become easier to model and compare. Why we did this EDA: To justify a transformation that makes relationships more linear and stable
+
+-   Regression with log(income) is more reliable (less imoprtance from outliers, better linear fit).
+
+-   Matching on log(income) is also more meaningful because distances reflect proportional differences (for eg, \$50k to \$100k is treated like \$200k to \$400k).
+
+**Non- technical explanation:** We log income because raw income has extreme high values that can distort results. Log-income makes the data more well-behaved, so regression is more stable and matching compares people based on **proportional income differences** (e.g., doubling income is treated the same at any income level).
+
+#### C) Group Summary
+
+```{r}
+# Group summary
+selection_summary <- analysis_data %>%
+  group_by(legacy_device) %>%
+  summarise(
+    n = n(),
+    income_mean = mean(household_income),
+    income_median = median(household_income),
+    log_income_mean = mean(log_income),
+    .groups = "drop"
+  )
+selection_summary
+
+```
+
+The sample is roughly balanced across device types, but income is not. Patients with modern devices have much higher incomes than patients with legacy devices. The same pattern shows up in log(income). **Therefore, device type is strongly tied to wealth, so any “pacemaker to MoCA” comparison risks mixing pacemaker effects with wealth differences.**
+
+#### D) Income Overlap by treatment group
+
+```{r}
+
+analysis_data %>%
+  mutate(device_type = factor(legacy_device, levels=c(0,1),
+                              labels=c("Modern (0)", "Legacy (1)"))) %>%
+  ggplot(aes(x = log_income, fill = device_type)) +
+  geom_histogram(bins = 40, alpha = 0.6, position = "identity") +
+  labs(title = "Income differs by device type (non-random treatment assignment)",
+       x = "log(Household income)", y = "Count", fill = "Device type")
+
+```
+
+This plot makes the selection story visual: the Modern (0) distribution is shifted right (richer), while Legacy (1) is shifted left (poorer), with partial overlap.
+
+-   Treatment assignment is not random. a naive regression moca \~ legacy_device would be confounded.
+
+-   We need to adjust for income and later consider matching to compare patients at similar income levels (common support matters because overlap isn’t perfect).
+
+**Non technical explanation:**
+
+This chart shows a clear pattern: people with modern devices tend to have higher incomes, and people with legacy devices tend to have lower incomes (there’s only some overlap).
+
+That means device type isn’t assigned by chance, so if we simply compare MoCA scores by device type, we’d be mixing the device effect with income differences.
+
+So we’ll control for income in regression and may also use matching to compare patients with similar incomes.
+
+## 3. Regresssion Adjustment
+
+### 3.1 Basic Regression Adjustment
+
+```{r}
+#Running OLS while controlling for wealth
+regad.ate <- lm(moca_score~legacy_device+household_income, 
+                data = analysis_data)
+```
+
+```{r}
+summary(regad.ate)
+```
+
+#### 3.1.1 Technical Explanation
+
+Based on our DAG, we know that the outcome Y is dependent on two variables, namely the treatment D and the confounder X (wealth). Mathematically, this can be expressed as:
+
+**E**$$Y\|D,X$$ = a + bD + cX +e
+
+The aim of regression adjustment, is to predict **Y1 - Y0**, not Y, and hence we only use good covariates. In our case that is only wealth.
+
+Thus, to find **ATE**,:
+
+**Y1 = E**$$Y\|(D=1),X$$ = a + b +cX +e
+
+**(-)**
+
+**Y0 = E**$$Y\|(D=0),X$$ = a + cX +e
+
+**\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_**
+
+**ATE = b**
+
+Hence, when we apply this programatically by running a linear regression, the coefficient for D, which is -3.074, is the ATE. It is statistically significant since the p-val is less than 0.05.
+
+#### 3.1.2 Non-Technical Explanation
+
+Here the coefficient of treatment, b =-3.074, indicates that, while controlling for wealth (taking wealth into account), when a legacy pacemaker is implemented instead of an MRI-conditional pacemaker, the MoCA score drops by 3.074 points
+
+### 3.2 RA + Matching
+
+```{r}
+if (!requireNamespace("optmatch", quietly = TRUE)) install.packages("optmatch")
+if (!requireNamespace("MatchIt", quietly = TRUE)) install.packages("MatchIt")
+
+library(MatchIt)
+
+```
+
+```{r}
+library("MatchIt")
+matches.ate <- matchit(legacy_device~household_income,
+                  data=data, method = "full")
+
+matched.ate <- match.data(matches.ate)
+```
+
+```{r}
+library("marginaleffects")
+library("dplyr")
+library("tidyverse")
+ate.weights<-matched.ate$weights
+
+regad.match.ate<-lm(moca_score~legacy_device+household_income, data=matched.ate, weights = ate.weights)
+
+summary(regad.match.ate)
+
+ate<-avg_comparisons(
+  regad.match.ate,
+  variables = "legacy_device",
+  newdata = matched.ate,
+  vcov = ~subclass,
+  wts = "weights"
+  )
+ate
+```
+
+#### 3.2.1 Technical Explanation
+
+To strengthen our estimate, we first do matching, and then do regression adjustment. To estimate ATE using matching, we need to do full matching, that imposes common support so that the size of the matched sample is different than that of the raw data.
+
+After that, we run a weighted least squares regression of moca_score on the covariate in the matched sample, using matched weights to get the ATE which is -2.4. It is statistically significant as the p-value is less than 0.05
+
+#### 3.2.2 Non-Technical Explanantion
+
+The first step we are doing is matching, which means that we are mapping people who 'look similar', in the treated and control groups. In our case "looking-similar", means people who have the similar income. Full matching specifically ensures that every sample/person in the dataset is used and that nothing is discarded, which is essential as ATE looks at the entire population.
+
+After that , we run a weighted regression, where the weights ensure treated and control groups are balanced on household income.
+
+Finally, we calculate ATE, by taking the difference in means between having and not having a legacy pacemaker. The ATE comes out to be -2.4, which indicates that using a legacy pacemaker causes a drop of 2.4 points on the MoCA score.
+
+## 4. A New Problem
+
+### 4.1 Client Update
+
+When we go to present our initial analysis to the client, we get a new update from them. According to a new study they conducted, there is another confounder that affects both the treatment and the outcome, which is **health literacy**. However, there is a problem, which is that health literacy cannot be measured.
+
+### 4.2 A new updated DAG
+
+```{r}
+#| label: fig-dag2
+#| fig-cap: "DAG 2: Including the unobserved confounder (Health Literacy)"
+
+library(ggdag)
+library(dagitty)
+library(ggplot2)
+library(dplyr)
+
+# Define DAG 2 with Health Literacy as latent (unobserved)
+dag2 <- dagify(
+  Y ~ D + X + U,
+  D ~ X + U,
+  coords = list(
+    x = c(D = 0, Y = 2, X = 0.5, U = 1.5),
+    y = c(D = 0, Y = 0, X = 1, U = 1)
+  ),
+  labels = c(
+    Y = "MoCA Score (Y)",
+    D = "Legacy Pacemaker (D=1)",
+    X = "Household Income",
+    U = "Health Literacy (U)"
+  ),
+  exposure = "D",
+  outcome = "Y",
+  latent = "U"
+)
+
+# Convert to tidy format and add latent indicator
+dag2_tidy <- tidy_dagitty(dag2) %>%
+  mutate(is_latent = (name == "U"))
+
+ggplot(dag2_tidy, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_edges() +
+  geom_dag_point(aes(fill = is_latent, color = is_latent),
+                 shape = 21, size = 18, stroke = 1.5) +
+  geom_dag_text(aes(label = label), size = 2.5, color = "black") +
+  scale_fill_manual(values = c("FALSE" = "steelblue", "TRUE" = "white"), guide = "none") +
+  scale_color_manual(values = c("FALSE" = "steelblue", "TRUE" = "black"), guide = "none") +
+  theme_dag() +
+  labs(title = "DAG 2: With Omitted Variable (Health Literacy)",
+       caption = "Hollow node = unobserved")
+```
+
+### 4.3 Non-technical explanation: the Hidden Variable
+
+We created a **Health Literacy score (0–100)** to act as our hidden variable. Based on findings from the National Assessment of Adult Literacy, we know that wealthier individuals generally have higher health literacy due to better access to education and resources.
+
+**Citation:** *Kutner, M., et al. (2006). The Health Literacy of America's Adults: Results from the 2003 National Assessment of Adult Literacy. U.S. Department of Education.*
+
+We modeled this by starting everyone at a baseline score of 50 and adding points for higher income, while adding some random noise to keep it realistic (since not every wealthy person is health literate). This variable is crucial for our analysis because it acts as a **hidden driver of health.** Patients with high literacy are better at maintaining their cognitive health, regardless of which pacemaker they get. If we ignore this variable in our regression later, it will create the exact bias we need to demonstrate.
+
+### 4.4 Why is our hidden variable an OVB?
+
+The omitted variable (**Health Literacy**) must satisfy two conditions:
+
+1.  **Correlated with Treatment:** Patients with lower health literacy are more likely to get the Legacy device (because they are also lower income/less able to advocate for themselves).
+
+2.  **Correlated with Outcome:** Patients with high health literacy have higher baseline MoCA scores (better understanding of health maintenance), independent of the device.
+
+By splitting the Cognitive Baseline benefit between **Income** and **Health Literacy**, we create a scenario where, if you regress Y on D and Income but **forget** Health Literacy, your results will still be biased.
+
+### 4.4 Data Simulation Code
+
+```{r}
+library(tidyverse)
+library(knitr)
+
+# @team please do not change the seed to ensure reproducibility!
+set.seed(2026)
+
+# --- PART 1: Generate Covariates (N=5000) ---
+n <- 5000
+
+# 1. Household Income (Same as Project 1)
+meanlog_income <- 11.33
+sdlog_income   <- 0.85
+
+data <- tibble(
+  id = 1:n,
+  household_income_raw = rlnorm(n, meanlog = meanlog_income, sdlog = sdlog_income)
+) %>%
+  mutate(
+    household_income = round(household_income_raw, -2),
+    log_income = log(household_income),
+    # Standardized income (z-score) helps with math scaling
+    z_income = (log_income - meanlog_income) / sdlog_income
+  )
+
+# 2. NEW: Health Literacy (The Omitted Variable)
+# Logic: Health Literacy is correlated with Income (wealthier people often have better edu/access),
+# but it is NOT perfect. There is random variation (noise).
+# Scale: 0 to 100.
+data <- data %>%
+  mutate(
+    # Base 50 + correlation with income + random variation
+    hl_raw = 50 + (15 * z_income) + rnorm(n, mean = 0, sd = 10),
+    
+    # Clip to 0-100 range
+    health_literacy = pmin(pmax(round(hl_raw, 0), 0), 100)
+  ) %>%
+  select(-household_income_raw, -hl_raw)
+
+# --- PART 2: Assign Treatment (Selection Bias) ---
+# Treatment: D = 1 (Legacy) vs D = 0 (MRI-conditional)
+# We keep the Project 1 mechanism: Income drives access.
+# *Crucially for OVB*: Because Income drives Treatment, and Income is correlated with Health Literacy,
+# Health Literacy becomes indirectly correlated with Treatment.
+
+logit_prob  <- 0 + (-1.6) * data$z_income
+prob_legacy <- plogis(logit_prob)
+
+data$legacy_device <- rbinom(n, 1, prob_legacy)
+
+# --- PART 3: Generate Outcome (MoCA Score) ---
+# TRUE TREATMENT EFFECT: -2.5
+
+true_treatment_effect <- -2.5
+
+# OVB SETUP:
+# In Project 2, we reveal that Income was partly a proxy for HEALTH LITERACY.
+# We split the "baseline benefit" between Income (access to food/shelter) and Literacy (behaviors).
+
+data <- data %>%
+  mutate(
+    # Baseline: 26
+    # Benefit 1: Pure Money Effect (+0.8 points per SD of income)
+    # Benefit 2: Health Literacy Effect (+0.05 points per unit of literacy)
+    # Note: Since Literacy and Income are correlated, these amplify each other.
+    cog_baseline = 26.0 + (0.8 * z_income) + (0.05 * (health_literacy - 50)),
+
+    # Noise
+    noise = rnorm(n, mean = 0, sd = 2.0),
+
+    # Potential Outcomes
+    y_0 = cog_baseline + noise,
+    y_1 = cog_baseline + noise + true_treatment_effect,
+
+    # Observed Outcome
+    moca_score = ifelse(legacy_device == 1, y_1, y_0),
+    moca_score = pmin(pmax(moca_score, 0), 30)
+  )
+
+# --- PART 4: Verification Table ---
+# We verify that Legacy patients have LOWER Income AND LOWER Health Literacy.
+# This confirms Health Literacy satisfies the conditions to be an OVB Confounder.
+
+verification_table <- data %>%
+  group_by(legacy_device) %>%
+  summarise(
+    Count = n(),
+    Mean_Income   = paste0("$", format(mean(household_income), big.mark = ",")),
+    Mean_Health_Lit = round(mean(health_literacy), 1), # Should be lower for Legacy
+    Avg_MoCA = round(mean(moca_score), 1)
+  ) %>%
+  mutate(Group = ifelse(legacy_device == 1, "Legacy (Treatment)", "MRI-Conditional (Control)")) %>%
+  select(Group, Count, Mean_Income, Mean_Health_Lit, Avg_MoCA)
+
+kable(verification_table, caption = "Table 1: Characteristics by Group (Checking OVB Conditions)")
+
+# --- PART 5: Save Project 2 Data ---
+# We save the file including 'health_literacy' so you can use it in regressions
+# to show what happens when you include it vs. omit it.
+
+project2_data <- data %>%
+  select(id, household_income, health_literacy, legacy_device, moca_score)
+
+write_csv(project2_data, "Project2_OVB_Data.csv")
+
+# Quick print to check
+head(project2_data)
+```
+
+### 4.5 EDA
+
+```{r}
+library(tidyverse)
+library(scales)
+
+df_eda1 <- project2_data %>%
+  select(-health_literacy) %>%# make sure we do NOT use the omitted variable in EDA
+  mutate(
+    income_q = ntile(household_income, 4),
+    income_q = factor(income_q, levels = 1:4,
+                      labels = c("Q1 (lowest)", "Q2", "Q3", "Q4 (highest)"))
+  ) %>%
+  group_by(income_q) %>%
+  summarise(
+    n = n(),
+    p_legacy = mean(legacy_device),
+    # 95% CI for a proportion
+    se = sqrt(p_legacy * (1 - p_legacy) / n),
+    lo = pmax(0, p_legacy - 1.96 * se),
+    hi = pmin(1, p_legacy + 1.96 * se),
+    .groups = "drop"
+  )
+
+ggplot(df_eda1, aes(x = income_q, y = p_legacy)) +
+  geom_col(width = 0.7) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.15) +
+  geom_text(aes(label = paste0("n=", n)),
+            vjust = -0.6, size = 3.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, 1),
+                     expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    title = "Access Gradient: Legacy device assignment is not random",
+    subtitle = "Legacy devices are disproportionately assigned to lower-income patients",
+    x = "Household income quartile",
+    y = "Share receiving Legacy device (with 95% CI)"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+#### 4.5.1 Technical explanation
+
+This figure plots the share of patients receiving a Legacy device across household income quartiles.
+
+**Key pattern:** the probability of treatment D=1 (Legacy) falls sharply as income rises:
+
+1.  Q1 (lowest income): about 87% Legacy
+
+2.  Q2: about 61% Legacy
+
+3.  Q3: about 39% Legacy
+
+4.  Q4 (highest income): about 14% Legacy
+
+This is strong evidence that treatment assignment is not random. P ( D = 1 ∣ income ) varies a lot across income groups. This means that Cov ( D , income ) ≠ 0. P(D=1∣income) varies a lot across income groups meaning that Cov(D,income) ≠ 0
+
+**Why this matters for OVB:** if there exists an omitted factor U that affects cognition and is also related to income then:
+
+-   income is correlated with treatment, and
+
+-   income is correlated with the omitted factor U
+
+So a naive estimate of the effect of pacemaker type on MoCA will pick up both the pacemaker effect and the U, generating omitted variable bias.
+
+#### 4.5.2 Non-technical explanation
+
+This chart shows that the system does not give devices randomly.
+
+People in the lowest income group are far more likely to receive the older device, while people in the highest income group are much more likely to get the modern device.
+
+So if we later see that Legacy patients have lower cognitive scores, it wouldn’t be fair to immediately blame the device. The device is tied up with broader access differences that come with income and those differences can also affect cognition. That’s the reason we treat this as a causal inference problem and why we talk about hidden factors (ommitted variables)
+
+## 5. Omitted Variable Bias Demonstration
+
+```{r}
+#Long Regression
+longreg.ate <- lm(moca_score~legacy_device+
+                             household_income+
+                             health_literacy, 
+                  data = project2_data)
+```
+
+```{r}
+summary(longreg.ate)
+```
+
+```{r}
+#Auxillary Regression
+aux.reg <- lm(health_literacy~legacy_device+
+                              household_income, 
+              data= project2_data)
+```
+
+```{r}
+summary(aux.reg)
+```
+
+```{r}
+gamma.long = longreg.ate$coefficients[4]
+pi1 = aux.reg$coefficients[2]
+bias.computed = gamma.long*pi1
+bias.computed
+```
+
+```{r}
+beta.short = regad.ate$coefficients[2]
+beta.long = longreg.ate$coefficients[2]
+bias.observed = beta.short - beta.long
+bias.observed
+```
+
+```{r}
+library("sensemakr")
+sensitivity <- sensemakr(model = regad.ate, 
+                         treatment = "legacy_device")
+summary(sensitivity)
+```
+
+```{r}
+library("sensemakr")
+sensitivity <- sensemakr(model = longreg.ate, 
+                         treatment = "legacy_device")
+summary(sensitivity)
+```
+
+### 5.1 Technical Explanation
+
+Now that we know about a new confounder, namely health literacy, the new regression that we should ideally run, should be:
+
+**MoCA = a + bl*.*Legacy *+* c.Income + g.Literacy + e**
+
+However, what we can actually run, since health literacy is unknown, is what we ran earlier under Regression Adjustment:
+
+**MoCA = a + bs.Legacy +c.Income + v**
+
+where **v= g.Literacy +e**
+
+This is problematic as the error term is now orthogonal to the treatment, creating an omitted variable bias **(OVB)**.
+
+**bs,** which is an estimate of ATE, is equal to
+
+**bs = bl + g.p,**
+
+where **bl** is the actual ATE, and g.p is the bias.
+
+The **p** in the bias is obtained from the auxillary equation:
+
+**Literacy = p.Legacy + q.Income + u**
+
+::: callout-caution
+**In our code, we simulated this by assigning numerical values to health literacy. However, this was only for demonstration purposes, and will not be reproducible in a real life situation**
+:::
+
+We calculated the bias both by multiplying p and g, and by subtracting bl from bs, and the values are very close, around **-0.49**. After running sensitivity analysis on short and long regressions, we get robustness values of 43.17% and 41.63% respectively
+
+### 5.2 Non-Technical Explanation
+
+Omitted Variable Bias basically means that by leaving out an important confounder from the causal analysis, the obtained ATE is either over or under estimated. To find out which is the case, we held discussions with our client
+
+After consulting with our client, we found out that:
+
+-   g is positive, as health literacy is likely to increase the MoCA Score
+
+-   p is negative, as the presence of a legacy pacemaker likely means that the person has lower health literacy
+
+Thus, after consulting with the client, we realized that the OVB was negative, which meant that we had underestimated the ATE which we initially obtained through regression. This also falls in line with the OVB we obtained through the demonstration , -0.49.
+
+The robustness obtained from the sensitivity analysis drops when controlling for health literacy, because health literacy was doing some of the work in explaining the treatment effect, and controlling for it makes the treatment effect weaker, and reinforces that health literacy is indeed an important omitted variable
+
+## 6. Instrumental Variables
+
+### 6.1 The Problem with OVB
+
+In Section 5, we demonstrated that health literacy is an omitted variable that biases our treatment effect estimate. However, in practice, **health literacy cannot be measured**. This is a common problem in causal inference: we know a confounder exists, but we cannot observe it.
+
+**Instrumental Variables (IV)** offer a solution. Instead of trying to control for health literacy directly, we find a variable that:
+
+1.  **Affects treatment assignment** (whether a patient gets a legacy device)
+2.  **Does NOT directly affect the outcome** (MoCA score)
+3.  **Is NOT correlated with the omitted variable** (health literacy)
+
+### 6.2 Our Instrument: Regional Legacy Device Supply
+
+We propose using **regional legacy device supply** as an instrument. The logic:
+
+-   **Relevance:** Hospital regions vary in their device inventories due to procurement contracts, supplier relationships, and equipment age. A region with higher legacy device supply will implant more legacy devices, regardless of patient characteristics.
+
+-   **Exclusion:** The supply of legacy devices in a region does not directly affect a patient's cognitive function. It only affects cognition through the type of device implanted.
+
+-   **Independence:** Regional supply decisions are made by hospital administrators based on cost, vendor relationships, and inventory cycles — not based on patient health literacy levels.
+
+**Citation:** Regional variation in medical device adoption is well-documented. See: *Chandra, A., & Staiger, D. (2007). Productivity Spillovers in Healthcare. Journal of Political Economy.*
+
+```{r}
+#| label: fig-dag3
+#| fig-cap: "DAG 3: Instrumental Variables setup with Regional Legacy Supply"
+
+library(ggdag)
+library(dagitty)
+library(ggplot2)
+library(dplyr)
+
+# Define DAG 3 with Instrument
+dag3 <- dagify(
+  Y ~ D + X + U,
+  D ~ X + U + Z,
+  coords = list(
+    x = c(Z = -1, D = 0, Y = 2, X = 0.5, U = 1.5),
+    y = c(Z = 0, D = 0, Y = 0, X = 1, U = 1)
+  ),
+  labels = c(
+    Y = "MoCA Score (Y)",
+    D = "Legacy Pacemaker (D)",
+    X = "Household Income",
+    U = "Health Literacy (U)",
+    Z = "Regional Supply (Z)"
+  ),
+  exposure = "D",
+  outcome = "Y",
+  latent = "U"
+)
+
+# Convert to tidy format and add node type indicator
+dag3_tidy <- tidy_dagitty(dag3) %>%
+  mutate(
+    node_type = case_when(
+      name == "U" ~ "unobserved",
+      name == "Z" ~ "instrument",
+      TRUE ~ "observed"
+    )
+  )
+
+ggplot(dag3_tidy, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_edges() +
+  geom_dag_point(aes(fill = node_type, color = node_type),
+                 shape = 21, size = 18, stroke = 1.5) +
+  geom_dag_text(aes(label = label), size = 2.3, color = "black") +
+  scale_fill_manual(values = c("observed" = "steelblue",
+                                "unobserved" = "white",
+                                "instrument" = "forestgreen"), guide = "none") +
+  scale_color_manual(values = c("observed" = "steelblue",
+                                 "unobserved" = "black",
+                                 "instrument" = "forestgreen"), guide = "none") +
+  theme_dag() +
+  labs(title = "DAG 3: Instrumental Variable (Regional Supply)",
+       caption = "Hollow = unobserved | Green = instrument")
+```
+
+### 6.3 Simulating the Instrument
+
+We extend the data generating process from Section 4.4 to include our instrument. The key parameters remain the same:
+
+-   **Income effect on selection:** `-1.6` (from Section 4.4)
+-   **Baseline MoCA:** `26.0` with income effect `0.8` and health literacy effect `0.05` (from Section 4.4)
+-   **True treatment effect:** `-2.5` (from Section 4.4)
+-   **Noise SD:** `2.0` (from Section 4.4)
+
+The new parameter we introduce:
+
+-   **Instrument effect on selection:** `2.5` — this determines how strongly regional supply affects the probability of receiving a legacy device. We choose `2.5` to ensure the instrument is relevant (strong first stage) while not dominating the selection process.
+
+```{r}
+library(AER)
+
+set.seed(2026)
+
+# --- Parameters (matching Section 4.4) ---
+meanlog_income <- 11.33
+sdlog_income <- 0.85
+income_selection_effect <- -1.6  # from Section 4.4
+instrument_selection_effect <- 2.5  # NEW: instrument strength
+
+# --- Add instrument to data ---
+# Step 1: Add region assignment and instrument
+project2_data <- project2_data %>%
+  mutate(
+    region_id = sample(1:50, n(), replace = TRUE),
+    regional_legacy_supply = runif(50)[region_id],
+    z_income = (log(household_income) - meanlog_income) / sdlog_income,
+    logit_prob_iv = 0 +
+                    (income_selection_effect) * z_income +
+                    (instrument_selection_effect) * regional_legacy_supply,
+    prob_legacy_iv = plogis(logit_prob_iv)
+  )
+
+# Step 2: Assign treatment (separate mutate for reliability)
+project2_data <- project2_data %>%
+  mutate(
+    legacy_device_iv = as.integer(runif(n()) < prob_legacy_iv)
+  )
+
+# --- Regenerate outcome with new treatment ---
+# Using same DGP as Section 4.4
+project2_data <- project2_data %>%
+  mutate(
+    moca_score_iv = 26.0 +
+                    (0.8 * z_income) +                        # income effect on cognition
+                    (0.05 * (health_literacy - 50)) +         # health literacy effect
+                    (true_treatment_effect) * legacy_device_iv +  # treatment effect (-2.5)
+                    rnorm(n(), 0, 2.0),                        # noise
+    moca_score_iv = pmin(pmax(moca_score_iv, 0), 30)
+  )
+
+# --- Verification ---
+cat("Correlation (instrument, treatment):",
+    round(cor(project2_data$regional_legacy_supply, project2_data$legacy_device_iv), 3), "\n")
+cat("Correlation (instrument, health literacy):",
+    round(cor(project2_data$regional_legacy_supply, project2_data$health_literacy), 3), "\n")
+```
+
+### 6.4 IV Regression
+
+```{r}
+# OLS (biased due to omitted health literacy)
+ols_biased <- lm(moca_score_iv ~ legacy_device_iv + household_income,
+                  data = project2_data)
+
+# IV regression using regional_legacy_supply as instrument
+iv_model <- ivreg(moca_score_iv ~ legacy_device_iv + household_income |
+                   regional_legacy_supply + household_income,
+                  data = project2_data)
+
+# Compare estimates
+cat("OLS estimate (biased):", round(coef(ols_biased)["legacy_device_iv"], 3), "\n")
+cat("IV estimate:", round(coef(iv_model)["legacy_device_iv"], 3), "\n")
+cat("True treatment effect:", true_treatment_effect, "\n")
+```
+
+```{r}
+summary(iv_model)
+```
+
+### 6.5 First Stage and Reduced Form
+
+To understand how IV works, we decompose it into two stages:
+
+**First Stage:** Does the instrument predict treatment?
+
+$$\text{Legacy Device} = \pi_0 + \pi_1 \cdot \text{Regional Supply} + \pi_2 \cdot \text{Income} + \nu$$
+
+```{r}
+# First Stage: Treatment ~ Instrument + Controls
+first_stage <- lm(legacy_device_iv ~ regional_legacy_supply + household_income,
+                   data = project2_data)
+summary(first_stage)
+```
+
+**Reduced Form:** Does the instrument predict the outcome?
+
+$$\text{MoCA} = \rho_0 + \rho_1 \cdot \text{Regional Supply} + \rho_2 \cdot \text{Income} + \epsilon$$
+
+```{r}
+# Reduced Form: Outcome ~ Instrument + Controls
+reduced_form <- lm(moca_score_iv ~ regional_legacy_supply + household_income,
+                    data = project2_data)
+summary(reduced_form)
+```
+
+**Manual IV Calculation:**
+
+The IV estimator can be computed as the ratio of reduced form to first stage coefficients:
+
+$$\hat{\beta}_{IV} = \frac{\hat{\rho}_1}{\hat{\pi}_1}$$
+
+```{r}
+# Manual IV estimate
+iv_manual <- coef(reduced_form)["regional_legacy_supply"] /
+             coef(first_stage)["regional_legacy_supply"]
+cat("Manual IV estimate:", round(iv_manual, 3), "\n")
+cat("ivreg IV estimate:", round(coef(iv_model)["legacy_device_iv"], 3), "\n")
+```
+
+### 6.6 Diagnostic Tests
+
+```{r}
+summary(iv_model, diagnostics = TRUE)
+```
+
+#### 6.6.1 Interpreting the Diagnostics
+
+**Weak Instruments Test:**
+
+-   $H_0$: Instrument is weak (not sufficiently correlated with treatment)
+-   $H_a$: Instrument is strong
+-   A small p-value suggests we reject the null, indicating our instrument is sufficiently relevant.
+
+**Wu-Hausman Test:**
+
+-   $H_0$: Treatment is exogenous (OLS is consistent)
+-   $H_a$: Treatment is endogenous (IV is needed)
+-   A small p-value suggests we reject exogeneity, confirming that OVB exists and IV is appropriate.
+
+### 6.7 Technical Explanation
+
+The IV estimator isolates the variation in treatment that comes from the instrument (regional supply) rather than from confounded sources (income → health literacy). This "exogenous" variation allows us to estimate the causal effect without directly observing health literacy.
+
+Mathematically:
+
+$$\hat{\beta}_{IV} = \frac{Cov(Y, Z)}{Cov(D, Z)}$$
+
+Where:
+
+-   $Y$ = MoCA score
+-   $D$ = Legacy device (treatment)
+-   $Z$ = Regional legacy supply (instrument)
+
+Because $Z$ is uncorrelated with health literacy (by design), the IV estimate is not contaminated by the omitted variable.
+
+### 6.8 Non-Technical Explanation
+
+> **What we tell the client:**
+>
+> *We found a clever workaround for the health literacy problem. Instead of trying to measure health literacy (which is impossible), we looked at **why** some patients get legacy devices for reasons that have nothing to do with their personal characteristics.*
+>
+> *It turns out that hospitals in different regions have different inventories of pacemakers. Some regions have more legacy devices simply because of old supplier contracts or procurement timing — not because their patients are any different.*
+>
+> *By focusing on this "random" variation in device availability, we can estimate the effect of device type on cognition without directly measuring health literacy.*
+>
+> *Our IV analysis estimates that legacy devices cause a reduction in MoCA scores of approximately 2 points. While IV estimates typically have higher variance than OLS, they address the fundamental problem of unobserved confounding that would otherwise bias our conclusions.*
+
+### 6.9 Summary Table
+
+```{r}
+# Create comparison table
+results_table <- data.frame(
+  Method = c("OLS (no controls)",
+             "OLS (controlling for income)",
+             "OLS (controlling for income + health literacy)",
+             "IV (regional supply instrument)"),
+  Estimate = c(
+    round(coef(lm(moca_score_iv ~ legacy_device_iv, data = project2_data))["legacy_device_iv"], 3),
+    round(coef(ols_biased)["legacy_device_iv"], 3),
+    round(coef(lm(moca_score_iv ~ legacy_device_iv + household_income + health_literacy,
+                  data = project2_data))["legacy_device_iv"], 3),
+    round(coef(iv_model)["legacy_device_iv"], 3)
+  ),
+  True_Effect = rep(true_treatment_effect, 4)
+)
+
+kable(results_table,
+      caption = "Table 2: Comparison of Treatment Effect Estimates",
+      col.names = c("Method", "Estimated ATE", "True ATE"))
+```
+
+### 6.10 Conclusion
+
+Our IV analysis addresses the fundamental challenge posed by unobserved health literacy. By leveraging exogenous variation in regional device supply, we obtain an estimate of the causal effect of legacy pacemakers on cognitive outcomes that does not require observing health literacy directly.
+
+**Key findings:**
+
+1.  The IV estimate (\~-2.0) corrects for omitted variable bias in the direction predicted by theory, though IV estimates have higher variance than OLS and may not precisely match the true effect in finite samples
+2.  Diagnostic tests confirm the instrument is relevant (strong first stage, F \> 10) and that endogeneity exists (Wu-Hausman rejects exogeneity at p \< 0.01)
+3.  Both OLS and IV approaches confirm that legacy pacemakers cause a clinically meaningful reduction in MoCA scores (estimates range from -2 to -3 points), supporting the hypothesis that diagnostic barriers lead to worse cognitive outcomes
+
+**Policy implication:** The National Academies should consider recommending that hospitals prioritize MRI-conditional devices, particularly for patients at risk of cognitive decline, to avoid the diagnostic penalty associated with legacy systems.
+
+## Appendix: Use of AI (Data Simulation)
+
+Gemini was used as a coding assistant to help create simulation datasets. The goal of the code was to generate mock data that matches our project narrative and creates a realistic setting that introduces selection bias.
+
+We gave the AI the structure and assumptions the code needed to follow:
+
+-   Treatment = whether a patient has a legacy pacemaker, outcome = MoCA cognitive score, and wealth
+
+-   Lower income patients should have a higher probability of receiving a legacy device (to reflect unequal access to modern technology)
+
+-   Household income should be right-skewed and approximately consistent with a US style income distribution
+
+-   We specified a constant negative treatment effect of legacy devices on the MoCA score (a fixed penalty), plus random noise
+
+-   We asked it to generate an ommitted vairable bias (health literacy) where patients would lower income would get lower HL scores. However, there would be considerable outliers, adding to OVB effect.
+
+-   We also uploaded research papers for MoCA scores, census data for household incomes and pacemaker types so that we could base our synthetic data on real data, extracting the sd and mean for those, along with quartiles for income. We asked Gemini to simulate our data sccording to these research articles.
+
+Within the constraints above, the AI helped:
+
+-   translate our prompts into R code
+
+-   choose appropriate R functions (for example, generating log-normal income, using a logistic model for treatment assignment, bounding MoCA scores according to studies we cited)
+
+-   organize the script into readable parts and add commentary
+
+-   add a verification table and create an anlaysis only dataset that did not contain the hypothetical potential outcomes (both Y0 and Y1)
